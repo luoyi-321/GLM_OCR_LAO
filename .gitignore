@@ -1,0 +1,76 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# ── LLaMA-Factory ─────────────────────────────────────────────────────────────
+# Ignore the entire repo except the files we own
+LLaMA-Factory/
+!LLaMA-Factory/data/dataset_info.json
+!LLaMA-Factory/data/my_ocr_dataset*.json
+!LLaMA-Factory/glm_ocr_lora.yaml
+
+# ── Data / Datasets ───────────────────────────────────────────────────────────
+# Image files (too large for git – use Git LFS or external storage)
+data/images/
+data/**/*.png
+data/**/*.jpg
+data/**/*.jpeg
+data/**/*.webp
+data/**/*.bmp
+data/**/*.tiff
+
+# Split source images (same reason)
+splits/**/*.txt
+splits/**/*.png
+splits/**/*.jpg
+splits/**/*.jpeg
+splits/**/*.webp
+
+# Large JSON dataset files
+data/my_ocr_dataset.json
+data/my_ocr_dataset_train.json
+data/my_ocr_dataset_val.json
+data/my_ocr_dataset_test.json
+
+# ── Model weights ──────────────────────────────────────────────────────────────
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf
+
+# ── Training outputs ──────────────────────────────────────────────────────────
+outputs/
+runs/
+
+# ── Configs generated at runtime ──────────────────────────────────────────────
+configs/
+
+# ── Hugging Face cache ────────────────────────────────────────────────────────
+.cache/
+*.cache/
+
+# ── OS / Editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+tensorboard/

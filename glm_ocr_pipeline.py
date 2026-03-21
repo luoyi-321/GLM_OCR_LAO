@@ -17,6 +17,7 @@ Author: GLM-OCR Training Pipeline
 """
 
 import argparse
+import importlib
 import json
 import os
 import shutil
@@ -84,6 +85,16 @@ def print_step(step: int, description: str):
     print("-" * 40)
 
 
+def get_llamafactory_base_command() -> list[str]:
+    """Resolve LLaMA-Factory command in a cross-platform way."""
+    cli_path = shutil.which("llamafactory-cli") or shutil.which("llamafactory-cli.exe")
+    if cli_path:
+        return [cli_path]
+
+    # Fallback to module execution using the current Python interpreter.
+    return [sys.executable, "-m", "llamafactory.cli"]
+
+
 # =============================================================================
 # Setup Functions
 # =============================================================================
@@ -126,7 +137,7 @@ def setup_environment():
             sys.executable, "-m", "pip", "install", "huggingface_hub"
         ], check=False)
         run_command([
-            "huggingface-cli", "download",
+            "hf", "download",
             CONFIG["model_name"],
             "--local-dir", str(model_dir)
         ], check=False)
@@ -226,15 +237,98 @@ Important:
     return dataset_path
 
 
-def prepare_data(source_dir: Optional[str] = None, annotations_file: Optional[str] = None):
+def _resolve_image_for_gt(gt_file: Path) -> Optional[Path]:
+    """Resolve image path for a .gt.txt file."""
+    base_path = Path(str(gt_file)[:-7])  # remove ".gt.txt"
+    for ext in [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"]:
+        candidate = base_path.with_suffix(ext)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def convert_splits_to_sharegpt(splits_dir: Path):
+    """Convert split directories (train/val/test) with .png + .gt.txt pairs to ShareGPT JSON."""
+    data_dir = CONFIG["data_dir"]
+    images_dir = ensure_dir(data_dir / "images")
+    dataset_name = CONFIG["dataset_name"]
+
+    split_entries: dict[str, list[dict]] = {"train": [], "val": [], "test": []}
+    missing_images = 0
+
+    for split_name in ["train", "val", "test"]:
+        split_path = splits_dir / split_name
+        if not split_path.exists():
+            print(f"  [WARN] Split directory not found: {split_path}")
+            continue
+
+        dst_split_images = ensure_dir(images_dir / split_name)
+        gt_files = sorted(split_path.rglob("*.gt.txt"))
+        print(f"  Processing {split_name}: found {len(gt_files)} labels")
+
+        for gt_file in gt_files:
+            image_file = _resolve_image_for_gt(gt_file)
+            if image_file is None:
+                missing_images += 1
+                continue
+
+            text = gt_file.read_text(encoding="utf-8").strip()
+            if not text:
+                continue
+
+            dst_image = dst_split_images / image_file.name
+            shutil.copy2(image_file, dst_image)
+
+            split_entries[split_name].append({
+                "messages": [
+                    {"role": "user", "content": "<image>\nExtract all text from this document."},
+                    {"role": "assistant", "content": text}
+                ],
+                "images": [f"images/{split_name}/{dst_image.name}"]
+            })
+
+        split_dataset_path = data_dir / f"{dataset_name}_{split_name}.json"
+        with open(split_dataset_path, "w", encoding="utf-8") as f:
+            json.dump(split_entries[split_name], f, indent=2, ensure_ascii=False)
+
+        print(f"  Saved {len(split_entries[split_name])} samples -> {split_dataset_path.name}")
+
+    main_dataset = split_entries["train"]
+    if not main_dataset:
+        main_dataset = split_entries["train"] + split_entries["val"] + split_entries["test"]
+
+    dataset_path = data_dir / f"{dataset_name}.json"
+    with open(dataset_path, "w", encoding="utf-8") as f:
+        json.dump(main_dataset, f, indent=2, ensure_ascii=False)
+
+    print(f"Main training dataset saved: {dataset_path} ({len(main_dataset)} samples)")
+    if missing_images > 0:
+        print(f"[WARN] Skipped {missing_images} labels without matching images")
+
+
+def prepare_data(
+    source_dir: Optional[str] = None,
+    annotations_file: Optional[str] = None,
+    splits_dir: Optional[str] = None,
+):
     """Prepare training data from source images and annotations."""
     print_header("Preparing Training Data")
 
     data_dir = CONFIG["data_dir"]
     images_dir = data_dir / "images"
 
-    # Check if we have a source directory with images
-    if source_dir:
+    # Preferred path: convert pre-split OCR data
+    if splits_dir:
+        splits_path = Path(splits_dir)
+        if not splits_path.exists():
+            print(f"ERROR: splits directory not found: {splits_dir}")
+            sys.exit(1)
+
+        print_step(1, f"Converting split data from {splits_dir}")
+        convert_splits_to_sharegpt(splits_path)
+
+    # Legacy path: source images + annotations
+    elif source_dir:
         source_path = Path(source_dir)
         if source_path.exists():
             print_step(1, f"Copying images from {source_dir}")
@@ -243,17 +337,25 @@ def prepare_data(source_dir: Optional[str] = None, annotations_file: Optional[st
                     shutil.copy2(img, images_dir / img.name)
                     print(f"  Copied: {img.name}")
 
-    # Check if we have annotations
-    if annotations_file:
-        annotations_path = Path(annotations_file)
-        if annotations_path.exists():
-            print_step(2, "Processing annotations file")
-            # Load and convert annotations to ShareGPT format
-            convert_annotations_to_sharegpt(annotations_path)
+        # Check if we have annotations
+        if annotations_file:
+            annotations_path = Path(annotations_file)
+            if annotations_path.exists():
+                print_step(2, "Processing annotations file")
+                convert_annotations_to_sharegpt(annotations_path)
+        else:
+            print_step(2, "Creating sample dataset structure")
+            create_sample_dataset()
+
     else:
-        # Create sample dataset
-        print_step(1, "Creating sample dataset structure")
-        create_sample_dataset()
+        # Auto-detect local splits/ if available
+        default_splits = CONFIG["project_dir"] / "splits"
+        if default_splits.exists():
+            print_step(1, f"Converting split data from {default_splits}")
+            convert_splits_to_sharegpt(default_splits)
+        else:
+            print_step(1, "Creating sample dataset structure")
+            create_sample_dataset()
 
     # Register dataset in LLaMA-Factory
     print_step(3, "Registering dataset in LLaMA-Factory")
@@ -357,16 +459,30 @@ def register_dataset():
     else:
         dataset_info = {}
 
-    # Add our dataset
+    # Add our primary dataset
     dataset_name = CONFIG["dataset_name"]
-    dataset_info[dataset_name] = {
-        "file_name": f"{dataset_name}.json",
+    _sharegpt_entry = {
         "formatting": "sharegpt",
         "columns": {
             "messages": "messages",
             "images": "images"
+        },
+        "tags": {
+            "role_tag": "role",
+            "content_tag": "content",
+            "user_tag": "user",
+            "assistant_tag": "assistant"
         }
     }
+
+    dataset_info[dataset_name] = {"file_name": f"{dataset_name}.json", **_sharegpt_entry}
+
+    # Add split datasets if available
+    for split_name in ["train", "val", "test"]:
+        split_dataset = CONFIG["data_dir"] / f"{dataset_name}_{split_name}.json"
+        if split_dataset.exists():
+            split_key = f"{dataset_name}_{split_name}"
+            dataset_info[split_key] = {"file_name": split_dataset.name, **_sharegpt_entry}
 
     # Save updated dataset info
     with open(data_info_path, "w", encoding="utf-8") as f:
@@ -511,6 +627,8 @@ def train(mode: str = "lora", config_path: Optional[Path] = None):
         print("ERROR: LLaMA-Factory not found. Run 'python glm_ocr_pipeline.py setup' first.")
         sys.exit(1)
 
+    llama_factory_cmd = get_llamafactory_base_command()
+
     # Create or use existing config
     if config_path is None:
         config_path = create_training_config(mode)
@@ -526,9 +644,13 @@ def train(mode: str = "lora", config_path: Optional[Path] = None):
     print()
 
     # Run training
-    run_command([
-        "llamafactory-cli", "train", str(dst_config.name)
-    ], cwd=llama_factory_dir)
+    try:
+        run_command(llama_factory_cmd + ["train", str(dst_config.name)], cwd=llama_factory_dir)
+    except FileNotFoundError:
+        print("ERROR: LLaMA-Factory CLI not found in current environment.")
+        print("Run: python glm_ocr_pipeline.py setup")
+        print("Or install manually: python -m pip install -e .[torch,metrics] (inside LLaMA-Factory)")
+        sys.exit(1)
 
     print_header("Training Complete!")
     print(f"""
@@ -564,8 +686,10 @@ def export_model(adapter_path: Optional[str] = None):
 
     model_path = CONFIG["model_dir"] if CONFIG["model_dir"].exists() else CONFIG["model_name"]
 
-    run_command([
-        "llamafactory-cli", "export",
+    llama_factory_cmd = get_llamafactory_base_command()
+
+    run_command(llama_factory_cmd + [
+        "export",
         f"model_name_or_path={model_path}",
         f"adapter_name_or_path={adapter_path}",
         "template=glm_ocr",
@@ -588,9 +712,7 @@ def infer(image_path: str, model_path: Optional[str] = None, prompt: Optional[st
     print_header("GLM-OCR Inference")
 
     try:
-        import torch
-        from PIL import Image
-        from transformers import AutoTokenizer, AutoModelForCausalLM
+        from transformers import AutoProcessor, AutoModelForImageTextToText
     except ImportError:
         print("ERROR: Required packages not installed. Run 'python glm_ocr_pipeline.py setup' first.")
         sys.exit(1)
@@ -608,32 +730,80 @@ def infer(image_path: str, model_path: Optional[str] = None, prompt: Optional[st
     print(f"Model: {model_path}")
     print(f"Image: {image_path}")
 
+    if not Path(image_path).exists():
+        print(f"ERROR: Image file not found: {image_path}")
+        sys.exit(1)
+
     # Load model
     print_step(1, "Loading model")
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        trust_remote_code=True
-    )
+    model_path_obj = Path(model_path)
+    adapter_config_path = model_path_obj / "adapter_config.json"
 
-    # Load and process image
+    if adapter_config_path.exists():
+        try:
+            PeftModel = importlib.import_module("peft").PeftModel
+        except ImportError:
+            print("ERROR: PEFT is required to load LoRA checkpoints for inference.")
+            print("Install with: python -m pip install peft")
+            sys.exit(1)
+
+        with open(adapter_config_path, "r", encoding="utf-8") as f:
+            adapter_config = json.load(f)
+
+        base_model_path = adapter_config.get("base_model_name_or_path") or str(CONFIG["model_dir"])
+        print(f"Adapter checkpoint detected: {model_path}")
+        print(f"Base model: {base_model_path}")
+
+        processor = AutoProcessor.from_pretrained(base_model_path, trust_remote_code=True)
+        base_model = AutoModelForImageTextToText.from_pretrained(
+            base_model_path,
+            dtype="auto",
+            device_map="auto",
+            trust_remote_code=True
+        )
+        model = PeftModel.from_pretrained(base_model, str(model_path_obj))
+    else:
+        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_path,
+            dtype="auto",
+            device_map="auto",
+            trust_remote_code=True
+        )
+
+    model.eval()
+
+    # Build model inputs
     print_step(2, "Processing image")
-    image = Image.open(image_path).convert("RGB")
-
-    # Build query
     if prompt is None:
-        prompt = "Extract all text from this document."
+        prompt = "Text Recognition:"
 
-    query = tokenizer.from_list_format([
-        {"image": image_path},
-        {"text": prompt}
-    ])
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "url": image_path},
+                {"type": "text", "text": prompt}
+            ],
+        }
+    ]
+
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_dict=True,
+        return_tensors="pt"
+    ).to(model.device)
+    inputs.pop("token_type_ids", None)
 
     # Run inference
     print_step(3, "Running inference")
-    response, _ = model.chat(tokenizer, query=query, history=[])
+    generated_ids = model.generate(**inputs, max_new_tokens=2048)
+    response = processor.decode(
+        generated_ids[0][inputs["input_ids"].shape[1]:],
+        skip_special_tokens=True
+    ).strip()
 
     print_header("Result")
     print(response)
@@ -751,6 +921,7 @@ def main():
 Examples:
     python glm_ocr_pipeline.py setup
     python glm_ocr_pipeline.py prepare --source ./my_images --annotations labels.json
+    python glm_ocr_pipeline.py prepare --splits-dir ./splits
     python glm_ocr_pipeline.py train --mode lora
     python glm_ocr_pipeline.py infer --image document.png
     python glm_ocr_pipeline.py all --source ./my_images
@@ -766,6 +937,7 @@ Examples:
     prepare_parser = subparsers.add_parser("prepare", help="Prepare training data")
     prepare_parser.add_argument("--source", "-s", help="Source directory with images")
     prepare_parser.add_argument("--annotations", "-a", help="Annotations file (JSON or TSV)")
+    prepare_parser.add_argument("--splits-dir", help="Directory containing train/val/test with .png + .gt.txt pairs")
 
     # Train command
     train_parser = subparsers.add_parser("train", help="Run training")
@@ -818,7 +990,7 @@ Examples:
         setup_environment()
 
     elif args.command == "prepare":
-        prepare_data(args.source, args.annotations)
+        prepare_data(args.source, args.annotations, args.splits_dir)
 
     elif args.command == "train":
         config_path = Path(args.config) if args.config else None
