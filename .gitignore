@@ -37,6 +37,15 @@ splits/**/*.jpeg
 splits/**/*.webp
 
 # Large JSON dataset files
+data_id_card/*.json
+data_id_card/**/*.json
+data_id_card/**/*.jpg
+data_id_card/**/*.jpeg
+data_id_card/**/*.webp
+data_id_card/**/*.png
+
+
+# Large JSON dataset files
 data/my_ocr_dataset.json
 data/my_ocr_dataset_train.json
 data/my_ocr_dataset_val.json

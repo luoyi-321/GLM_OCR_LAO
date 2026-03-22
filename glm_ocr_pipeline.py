@@ -707,7 +707,17 @@ def export_model(adapter_path: Optional[str] = None):
 # Inference Functions
 # =============================================================================
 
-def infer(image_path: str, model_path: Optional[str] = None, prompt: Optional[str] = None):
+TASK_PROMPTS = {
+    "ocr": "Text Recognition:",
+    "id_card": "Extract ID/Passport information from this image in JSON format."
+}
+
+def infer(
+    image_path: str,
+    model_path: Optional[str] = None,
+    prompt: Optional[str] = None,
+    task: str = "ocr"
+):
     """Run inference on an image."""
     print_header("GLM-OCR Inference")
 
@@ -776,7 +786,7 @@ def infer(image_path: str, model_path: Optional[str] = None, prompt: Optional[st
     # Build model inputs
     print_step(2, "Processing image")
     if prompt is None:
-        prompt = "Text Recognition:"
+        prompt = TASK_PROMPTS.get(task, TASK_PROMPTS["ocr"])
 
     messages = [
         {
@@ -811,7 +821,13 @@ def infer(image_path: str, model_path: Optional[str] = None, prompt: Optional[st
     return response
 
 
-def batch_infer(input_dir: str, output_file: str = "results.json", model_path: Optional[str] = None):
+def batch_infer(
+    input_dir: str,
+    output_file: str = "results.json",
+    model_path: Optional[str] = None,
+    prompt: Optional[str] = None,
+    task: str = "ocr"
+):
     """Run inference on multiple images."""
     print_header("Batch Inference")
 
@@ -826,7 +842,7 @@ def batch_infer(input_dir: str, output_file: str = "results.json", model_path: O
     for i, img_path in enumerate(images, 1):
         print(f"\n[{i}/{len(images)}] Processing: {img_path.name}")
         try:
-            result = infer(str(img_path), model_path)
+            result = infer(str(img_path), model_path, prompt, task)
             results.append({
                 "image": img_path.name,
                 "text": result,
@@ -959,6 +975,12 @@ Examples:
     infer_parser.add_argument("--output", "-o", default="results.json", help="Output file for batch results")
     infer_parser.add_argument("--model", "-m", help="Path to model (default: auto-detect)")
     infer_parser.add_argument("--prompt", "-p", help="Custom prompt for inference")
+    infer_parser.add_argument(
+        "--task",
+        choices=["ocr", "id_card"],
+        default="ocr",
+        help="Inference prompt preset (ignored if --prompt is provided)"
+    )
 
     # Serve command
     serve_parser = subparsers.add_parser("serve", help="Start inference server")
@@ -1001,9 +1023,9 @@ Examples:
 
     elif args.command == "infer":
         if args.input_dir:
-            batch_infer(args.input_dir, args.output, args.model)
+            batch_infer(args.input_dir, args.output, args.model, args.prompt, args.task)
         elif args.image:
-            infer(args.image, args.model, args.prompt)
+            infer(args.image, args.model, args.prompt, args.task)
         else:
             print("ERROR: Specify --image or --input-dir")
             sys.exit(1)
